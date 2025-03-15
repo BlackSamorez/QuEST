@@ -94,7 +94,6 @@ torchrun --nproc_per_node=${NUM_GPUS} ./src/main.py \
     --dataset ${DATASET} \
     --model llama \
     --compile \
-    --latest-ckpt-interval 1000 \
     --acc-steps ${ACC_STEPS} \
     --batch-size ${BATCH_SIZE} \
     --wandb \

@@ -39,9 +39,9 @@ def train(
     if cfg.compile:
         print(f"Compiling model ...")
         model = torch.compile(model)
-        # if teacher_model is not None:
-        #     print("Compiling teacher model ...")
-        #     teacher_model = torch.compile(teacher_model)
+        if teacher_model is not None:
+            print("Compiling teacher model ...")
+            teacher_model = torch.compile(teacher_model, fullgraph=True, mode="reduce-overhead")
 
     if "cuda" in cfg.device:
         type_ctx = torch.amp.autocast(
