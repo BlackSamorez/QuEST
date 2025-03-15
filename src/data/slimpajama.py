@@ -5,7 +5,7 @@ from datasets import load_dataset
 import os
 
 
-tknzr = tiktoken.get_encoding("gpt2")
+tknzr = None # tiktoken.get_encoding("gpt2")
 
 
 def get_slimpajama_data(datasets_dir, num_proc=40):

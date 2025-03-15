@@ -5,7 +5,7 @@ from datasets import load_dataset
 import os
 
 
-hf_tknzr = AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf")
+hf_tknzr = None # AutoTokenizer.from_pretrained("meta-llama/Llama-2-7b-hf")
 
 
 def get_c4_data(datasets_dir, num_proc=40):

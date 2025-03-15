@@ -5,7 +5,7 @@ import tiktoken
 from datasets import load_dataset
 
 
-tknzr = tiktoken.get_encoding("gpt2")
+tknzr = None # tiktoken.get_encoding("gpt2")
 
 
 def get_redpajama_data(datasets_dir, num_proc=40):

@@ -33,11 +33,15 @@ def train(
     exp_dir,
     distributed_backend,
     cfg,
+    teacher_model,
 ):
     not_compiled_model = model
     if cfg.compile:
         print(f"Compiling model ...")
         model = torch.compile(model)
+        # if teacher_model is not None:
+        #     print("Compiling teacher model ...")
+        #     teacher_model = torch.compile(teacher_model)
 
     if "cuda" in cfg.device:
         type_ctx = torch.amp.autocast(
@@ -188,12 +192,19 @@ def train(
         for microstep_idx in range(cfg.acc_steps):  # gradient accumulation
             x, y = get_batch(train_reader, device=cfg.device)
             with type_ctx:
+                if teacher_model is not None:
+                    with torch.no_grad():
+                        outputs = teacher_model(x, all_logits=True, get_logits=True)
+                        target_logits = outputs["logits"]
+                else:
+                    target_logits = None
+
                 with distributed_backend.get_context_for_microstep_forward(
                     model=model,
                     microstep_idx=microstep_idx,
                     gradient_accumulation_steps=cfg.acc_steps,
                 ):
-                    outputs = model(x, targets=y)
+                    outputs = model(x, targets=y if teacher_model is None else None, target_logits=target_logits)
 
             loss = outputs["loss"] / cfg.acc_steps
             loss.backward()
@@ -238,7 +249,6 @@ def train(
                     {
                         "iter": curr_iter,
                         "train/loss": train_loss,
-                        "train/perplexity": 2.71828**train_loss,
                         "lr": current_lrs[0],
                         "iter_dt": dt,
                     }

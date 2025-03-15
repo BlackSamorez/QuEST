@@ -182,7 +182,7 @@ class Llama(GPTBase):
         assert config.vocab_size is not None
         assert config.sequence_length is not None
         self.config = config
-        self.tokenizer = tiktoken.get_encoding("gpt2")
+        self.tokenizer = None # tiktoken.get_encoding("gpt2")
 
         # create the token and position embeddings
         self.head_dim = config.n_embd // config.n_head
@@ -225,7 +225,9 @@ class Llama(GPTBase):
         n_params = sum(p.numel() for p in self.parameters())
         return n_params
 
-    def forward(self, idx, targets=None, get_logits=False, all_logits=False):
+    def forward(self, idx, targets=None, target_logits=None, get_logits=False, all_logits=False):
+        assert targets is None or target_logits is None, "Cannot provide both targets and target_logits"
+        
         device = idx.device
         b, t = idx.size()
         assert (
@@ -249,6 +251,14 @@ class Llama(GPTBase):
             logits = self.lm_head(x)
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
+            )
+        elif target_logits is not None:
+            logits = self.lm_head(x)
+            loss = F.kl_div(
+                F.log_softmax(logits, dim=-1),
+                F.log_softmax(target_logits, dim=-1),
+                reduction="batchmean",
+                log_target=True,
             )
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position

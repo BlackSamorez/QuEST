@@ -170,7 +170,7 @@ class GPTBase(nn.Module):
         assert config.vocab_size is not None
         assert config.sequence_length is not None
         self.config = config
-        self.tokenizer = tiktoken.get_encoding("gpt2")
+        self.tokenizer = None # tiktoken.get_encoding("gpt2")
 
         self.transformer = nn.ModuleDict(
             dict(
@@ -222,7 +222,7 @@ class GPTBase(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=self.config.init_std)
 
-    def forward(self, idx, targets=None, get_logits=False, all_logits=False):
+    def forward(self, idx, targets=None, target_logits=None, get_logits=False, all_logits=False):
         device = idx.device
         b, t = idx.size()
         assert (
@@ -255,6 +255,13 @@ class GPTBase(nn.Module):
                 logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
             )
 
+        elif target_logits is not None:
+            logits = self.lm_head(x)
+            loss = F.kl_div(
+                F.log_softmax(logits, dim=-1),
+                F.softmax(target_logits, dim=-1),
+                reduction="batchmean",
+            )
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             if all_logits:

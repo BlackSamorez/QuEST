@@ -14,7 +14,7 @@ from data.utils import DataReader, get_dataset
 import distributed
 from models.utils import get_model
 from optim.base import train
-from optim.utils import cos_inf_schedule, wsd_schedule
+from optim.utils import cos_inf_schedule, wsd_schedule, load_checkpoint
 
 
 def main(args):
@@ -165,6 +165,15 @@ def main(args):
     elif distributed_backend.is_master_process():
         exp_dir.mkdir(parents=True, exist_ok=True)
 
+    if args.teacher_dir is not None:
+        teacher_model = get_teacher_model(args)
+    else:
+        teacher_model = None
+
+    if distributed_backend.is_master_process():
+        with open(exp_dir / "summary.json", "w") as fs:
+            json.dump({"args": vars(args)}, fs)
+
     stats = train(
         model=model,
         opt=opt,
@@ -173,6 +182,7 @@ def main(args):
         exp_dir=exp_dir,
         distributed_backend=distributed_backend,
         cfg=args,
+        teacher_model=teacher_model,
     )
 
     stats["args"] = vars(args)
@@ -180,6 +190,47 @@ def main(args):
         with open(exp_dir / "summary.json", "w") as fs:
             json.dump(stats, fs)
     distributed_backend.finalize()
+
+
+class PseudoDDP(torch.nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self._orig_mod = torch.nn.ModuleDict({
+            "module": model,
+        })
+
+    def forward(self, *args, **kwargs):
+        return self._orig_mod["module"](*args, **kwargs)
+
+
+def get_teacher_model(args):
+    teacher_dir = Path(args.teacher_dir)
+    if not teacher_dir.exists():
+        raise ValueError(f"Teacher directory {teacher_dir} does not exist.")
+    
+    teacher_config = json.load(open(teacher_dir / "summary.json"))["args"]
+    
+    # Convert dict to namespace for dot access
+    teacher_config = argparse.Namespace(**teacher_config)
+    
+    # Create teacher model
+    teacher_model = get_model(teacher_config).to(args.device)
+    teacher_model = PseudoDDP(teacher_model)
+
+    # Load teacher checkpoint
+    load_checkpoint(
+        teacher_model,
+        opt=None,
+        scheduler=None,
+        ckpt_path=teacher_dir / "ckpts" / "latest" / "main.pt",
+        device=args.device,
+    )
+    
+    # Freeze teacher model
+    for param in teacher_model.parameters():
+        param.requires_grad = False
+    
+    return teacher_model
 
 
 def get_args():

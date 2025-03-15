@@ -205,5 +205,12 @@ def parse_args(base_parser, args, namespace):
         type=json.loads,
         default="{}",
     )
+    
+    # Distillation
+    parser.add_argument(
+        "--teacher-dir",
+        type=str,
+        default=None,
+    )
 
     return parser.parse_args(args, namespace)

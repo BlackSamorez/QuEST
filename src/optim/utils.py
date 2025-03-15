@@ -136,7 +136,7 @@ def eval(
     ctx=nullcontext(),
     cfg=None,
 ):
-    assert model.training == False
+    # assert model.training == False
 
     loss_list_val, acc_list = [], []
 
@@ -261,9 +261,12 @@ def load_checkpoint(model, opt, scheduler, ckpt_path, device):
         model = model.module
 
     ckpt = torch.load(ckpt_path, map_location=device)
-    model.load_state_dict(ckpt["model"])
-    opt.load_state_dict(ckpt["optimizer"])
-    scheduler.load_state_dict(ckpt["scheduler"])
+    if model is not None:
+        model.load_state_dict(ckpt["model"])
+    if opt is not None:
+        opt.load_state_dict(ckpt["optimizer"])
+    if scheduler is not None:
+        scheduler.load_state_dict(ckpt["scheduler"])
     itr = ckpt["itr"]
     return itr
 

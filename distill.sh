@@ -9,14 +9,15 @@ export BATCH_SIZE=64
 export ACC_STEPS=8
 export SEQUENCE_LENGTH=512
 export DATASET="c4" # "slimpajama"
+export TEACHER_DIR="./exps/UNTIED-100M-NoQuantizer@:NoQuantizer@-c4_c4_llama_nlayers8_nhead8_lr0.0006_sched_cos_warmup3814_decay_linear_0.1_iter38146_bs64x2_ws4_seed0_data_seed1337"
 
-# # 30M
-# export N_LAYER=6
-# export N_EMBD=640
-# export N_HEAD=5
-# export LR=0.0012
-# export TOKENS=3000000000 # 3B
-# export MODEL_SIZE_PREFIX="30M"
+# 30M
+export N_LAYER=6
+export N_EMBD=640
+export N_HEAD=5
+export LR=0.0012
+export TOKENS=3000000000 # 3B
+export MODEL_SIZE_PREFIX="30M"
 
 # # 50M
 # export N_LAYER=7
@@ -26,13 +27,13 @@ export DATASET="c4" # "slimpajama"
 # export TOKENS=5000000000 # 5B
 # export MODEL_SIZE_PREFIX="50M"
 
-# 100M
-export N_LAYER=8
-export N_EMBD=1024
-export N_HEAD=8
-export LR=0.0006
-export TOKENS=10000000000 # 10B
-export MODEL_SIZE_PREFIX="100M"
+# # 100M
+# export N_LAYER=8
+# export N_EMBD=1024
+# export N_HEAD=8
+# export LR=0.0006
+# export TOKENS=10000000000 # 10B
+# export MODEL_SIZE_PREFIX="100M"
 
 # # 200M
 # export N_LAYER=10
@@ -108,4 +109,5 @@ torchrun --nproc_per_node=${NUM_GPUS} ./src/main.py \
     --w-quant ${W_QUANT} \
     --w-quant-kwargs "${W_QUANT_KWARGS}" \
     --a-quant ${A_QUANT} \
-    --a-quant-kwargs "${A_QUANT_KWARGS}"
+    --a-quant-kwargs "${A_QUANT_KWARGS}" \
+    --teacher-dir ${TEACHER_DIR}
