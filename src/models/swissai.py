@@ -18,6 +18,17 @@ def precompute_inv_freq(dim: int, base: float, device: torch.device) -> torch.Te
     return 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.int64, device=device).float() / dim))
 
 
+def precompute_cos_sin(max_seq_len: int, inv_freq: torch.Tensor, device: torch.device):
+    position_ids = torch.arange(0, max_seq_len, dtype=torch.long, device=device).unsqueeze(0)
+    inv_freq_expanded = inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+    position_ids_expanded = position_ids[:, None, :].float()
+    freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+    emb = torch.cat((freqs, freqs), dim=-1)
+    cos = emb.cos()
+    sin = emb.sin()
+    return cos, sin
+
+
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
@@ -45,8 +56,8 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     Returns:
         `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
     """
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
+    cos = cos.unsqueeze(unsqueeze_dim).to(q.dtype)
+    sin = sin.unsqueeze(unsqueeze_dim).to(q.dtype)
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
@@ -324,6 +335,7 @@ class SwissAI(GPTBase):
         
         # Rotary position embeddings
         self.inv_freq = precompute_inv_freq(self.head_dim, config.rope_theta, config.device)
+        self.cos, self.sin = precompute_cos_sin(self.sequence_length, self.inv_freq, config.device)
 
         self.transformer = nn.ModuleDict(
             dict(
@@ -378,18 +390,9 @@ class SwissAI(GPTBase):
         # Token embeddings
         hidden_states = self.transformer.wte(idx)  # (b, t, n_embd)
         
-        # Get the pre-computed position embeddings for the current sequence
-        position_ids = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0)
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
-        position_ids_expanded = position_ids[:, None, :].float()
-        freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
-        emb = torch.cat((freqs, freqs), dim=-1)
-        cos = emb.cos().to(hidden_states.dtype)
-        sin = emb.sin().to(hidden_states.dtype)
-        
         # Forward through transformer layers
         for layer in self.transformer.h:
-            hidden_states = layer(hidden_states, (cos, sin))
+            hidden_states = layer(hidden_states, (self.cos[:, :t, :], self.sin[:, :t, :]))
         
         # Apply final layer norm
         hidden_states = self.transformer.ln_f(hidden_states)
