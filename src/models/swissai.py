@@ -14,51 +14,8 @@ from models.base import GPTBase
 from .quantization import QuantizedLinear, QUANTIZER_CLASSES
 
 
-def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Tensor:
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
-    t = torch.arange(end, device=freqs.device)  # type: ignore
-    freqs = torch.outer(t, freqs).float()  # type: ignore
-    cos_freqs = torch.cos(freqs)
-    sin_freqs = torch.sin(freqs)
-    # Stack the cos and sin parts in the last dimension to simulate complex numbers
-    return torch.stack((cos_freqs, sin_freqs), dim=-1)
-
-
-def _reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-    """
-    freqs_cis: complex - (seq_len, head_dim / 2)
-    x: complex - (bsz, seq_len, head_dim / 2)
-    """
-    ndim = x.ndim
-    assert 1 < ndim
-    assert freqs_cis.shape[:-1] == (x.shape[1], x.shape[-2])
-    # New shape for broadcasting
-    shape = [
-        1 if i != 1 and i != ndim - 2 else d for i, d in enumerate(x.shape[:-1])
-    ] + [2]
-    return freqs_cis.view(*shape)
-
-
-def apply_rotary_emb(q, k, freqs_cis):
-    # q, k: (B, T, nh, hs)
-    # freq_cis: (T, hs)
-    # return: (B, T, nh, hs), (B, T, nh, hs)
-    q = q.float().reshape(*q.shape[:-1], -1, 2)
-    k = k.float().reshape(*k.shape[:-1], -1, 2)
-
-    freqs_cis = _reshape_for_broadcast(freqs_cis, q)
-
-    # Perform manual "complex" multiplication
-    q_cos = q[..., 0] * freqs_cis[..., 0] - q[..., 1] * freqs_cis[..., 1]
-    q_sin = q[..., 0] * freqs_cis[..., 1] + q[..., 1] * freqs_cis[..., 0]
-    k_cos = k[..., 0] * freqs_cis[..., 0] - k[..., 1] * freqs_cis[..., 1]
-    k_sin = k[..., 0] * freqs_cis[..., 1] + k[..., 1] * freqs_cis[..., 0]
-
-    # Combine the results back into the interleaved format expected by q and k
-    q_out = torch.stack((q_cos, q_sin), dim=-1).reshape(q.shape).flatten(3)
-    k_out = torch.stack((k_cos, k_sin), dim=-1).reshape(k.shape).flatten(3)
-
-    return q_out, k_out
+def precompute_inv_freq(dim: int, base: float, device: torch.device) -> torch.Tensor:
+    return 1.0 / (base ** (torch.arange(0, dim, 2, dtype=torch.int64, device=device).float() / dim))
 
 
 def rotate_half(x):
@@ -66,6 +23,33 @@ def rotate_half(x):
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+    """Applies Rotary Position Embedding to the query and key tensors.
+
+    Args:
+        q (`torch.Tensor`): The query tensor.
+        k (`torch.Tensor`): The key tensor.
+        cos (`torch.Tensor`): The cosine part of the rotary embedding.
+        sin (`torch.Tensor`): The sine part of the rotary embedding.
+        position_ids (`torch.Tensor`, *optional*):
+            Deprecated and unused.
+        unsqueeze_dim (`int`, *optional*, defaults to 1):
+            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
+            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
+            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
+            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
+            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
+            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+    Returns:
+        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+    """
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
 
 
 class XIELU(nn.Module):
@@ -84,18 +68,24 @@ class XIELU(nn.Module):
                            alpha_n * torch.expm1(torch.min(x, self.eps)) - alpha_n * x + self.beta * x)
 
 
-class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-6):
+class SwissAIRMSNorm(nn.Module):
+    def __init__(self, hidden_size, eps=1e-6):
+        """
+        SwissAIRMSNorm is equivalent to T5LayerNorm
+        """
         super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
 
-    def _norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+    def forward(self, hidden_states):
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
 
-    def forward(self, x):
-        output = self._norm(x.float()).type_as(x)
-        return output * self.weight
+    def extra_repr(self):
+        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 
 class SwissAIAttention(nn.Module):
@@ -103,8 +93,8 @@ class SwissAIAttention(nn.Module):
         super().__init__()
         self.n_head = config.n_head
         self.n_embd = config.n_embd
-        self.num_key_value_heads = config.num_key_value_heads
-        self.num_key_value_groups = self.n_head // self.num_key_value_heads
+        self.n_kv_head = config.n_kv_head
+        self.num_key_value_groups = self.n_head // self.n_kv_head
         self.head_dim = config.n_embd // config.n_head
         self.dropout = config.dropout
         self.flash = hasattr(F, 'scaled_dot_product_attention')
@@ -123,7 +113,7 @@ class SwissAIAttention(nn.Module):
         
         self.k_proj = QuantizedLinear(
             config.n_embd, 
-            self.num_key_value_heads * self.head_dim, 
+            self.n_kv_head * self.head_dim, 
             bias=self.bias,
             weight_quantizer=QUANTIZER_CLASSES[config.w_quant](**config.w_quant_kwargs),
             activation_quantizer=QUANTIZER_CLASSES[config.a_quant](**config.a_quant_kwargs)
@@ -131,7 +121,7 @@ class SwissAIAttention(nn.Module):
         
         self.v_proj = QuantizedLinear(
             config.n_embd, 
-            self.num_key_value_heads * self.head_dim, 
+            self.n_kv_head * self.head_dim, 
             bias=self.bias,
             weight_quantizer=QUANTIZER_CLASSES[config.w_quant](**config.w_quant_kwargs),
             activation_quantizer=QUANTIZER_CLASSES[config.a_quant](**config.a_quant_kwargs)
@@ -146,8 +136,8 @@ class SwissAIAttention(nn.Module):
         )
         
         if self.qk_norm:
-            self.q_norm = RMSNorm(self.head_dim, eps=config.rmsnorm_eps)
-            self.k_norm = RMSNorm(self.head_dim, eps=config.rmsnorm_eps)
+            self.q_norm = SwissAIRMSNorm(self.head_dim, eps=config.rmsnorm_eps)
+            self.k_norm = SwissAIRMSNorm(self.head_dim, eps=config.rmsnorm_eps)
         else:
             self.q_norm = nn.Identity()
             self.k_norm = nn.Identity()
@@ -166,32 +156,27 @@ class SwissAIAttention(nn.Module):
         """
         Repeat key and values for multi-query attention
         """
-        batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+        batch, n_kv_head, slen, head_dim = hidden_states.shape
         if n_rep == 1:
             return hidden_states
-        hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-        return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+        hidden_states = hidden_states[:, :, None, :, :].expand(batch, n_kv_head, n_rep, slen, head_dim)
+        return hidden_states.reshape(batch, n_kv_head * n_rep, slen, head_dim)
 
     def forward(self, x, freqs_cis, attention_mask=None):
         # batch size, sequence length, embedding dimensionality
         B, T, C = x.size()
 
         # Calculate query, key, values
-        q = self.q_proj(x).view(B, T, self.n_head, self.head_dim)
-        k = self.k_proj(x).view(B, T, self.num_key_value_heads, self.head_dim)
-        v = self.v_proj(x).view(B, T, self.num_key_value_heads, self.head_dim)
+        q = self.q_proj(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
         
         # Apply RMSNorm to query and key if qk_norm is enabled
         q = self.q_norm(q)
         k = self.k_norm(k)
         
         # Apply rotary embeddings
-        q, k = apply_rotary_emb(q, k, freqs_cis)
-        
-        # Move head dimension to the front for attention calculation
-        q = q.transpose(1, 2)  # (B, nh, T, hs)
-        k = k.transpose(1, 2)  # (B, nkv, T, hs)
-        v = v.transpose(1, 2)  # (B, nkv, T, hs)
+        q, k = apply_rotary_pos_emb(q, k, freqs_cis[0], freqs_cis[1])
         
         # Repeat k and v for multi-query attention
         if self.num_key_value_groups > 1:
@@ -202,15 +187,12 @@ class SwissAIAttention(nn.Module):
         if self.flash:
             # Efficient attention using Flash Attention CUDA kernels
             y = torch.nn.functional.scaled_dot_product_attention(
-                q, k, v, attn_mask=attention_mask, dropout_p=0.0 if not self.training else self.dropout, is_causal=True
+                q, k, v,
+                attn_mask=attention_mask, dropout_p=0.0 if not self.training else self.dropout,
+                is_causal=True, scale=self.scaling,
             )
         else:
-            # Manual implementation of attention
-            att = (q @ k.transpose(-2, -1)) * self.scaling
-            att = att.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
-            att = F.softmax(att, dim=-1)
-            att = F.dropout(att, p=0.0 if not self.training else self.dropout, training=self.training)
-            y = att @ v  # (B, nh, T, hs) x (B, nh, T, hs) -> (B, nh, T, hs)
+            raise NotImplementedError("Standard attention is not implemented")
             
         # Reshape and apply output projection
         y = y.transpose(1, 2).contiguous().view(B, T, -1)
@@ -222,7 +204,7 @@ class SwissAIAttention(nn.Module):
 class SwissAIMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.hidden_act = getattr(config, "hidden_act", "silu")
+        self.hidden_act = getattr(config, "hidden_act", "xielu")
         self.intermediate_size = config.intermediate_size
         
         # If config doesn't specify a multiple_of value, use 256 as default
@@ -284,8 +266,8 @@ class SwissAIDecoderLayer(nn.Module):
         self.self_attn = SwissAIAttention(config)
         self.mlp = SwissAIMLP(config)
         
-        self.attention_layernorm = RMSNorm(config.n_embd, eps=config.rmsnorm_eps)
-        self.feedforward_layernorm = RMSNorm(config.n_embd, eps=config.rmsnorm_eps)
+        self.attention_layernorm = SwissAIRMSNorm(config.n_embd, eps=config.rmsnorm_eps)
+        self.feedforward_layernorm = SwissAIRMSNorm(config.n_embd, eps=config.rmsnorm_eps)
         
         self.post_norm = getattr(config, "post_norm", False)
 
@@ -341,14 +323,14 @@ class SwissAI(GPTBase):
         self.head_dim = config.n_embd // config.n_head
         
         # Rotary position embeddings
-        self.freqs_cis = precompute_freqs_cis(self.head_dim, config.sequence_length)
+        self.inv_freq = precompute_inv_freq(self.head_dim, config.rope_theta, config.device)
 
         self.transformer = nn.ModuleDict(
             dict(
                 wte=nn.Embedding(config.vocab_size, config.n_embd),
                 drop=nn.Dropout(config.dropout),
                 h=nn.ModuleList([SwissAIDecoderLayer(config, i) for i in range(config.n_layer)]),
-                ln_f=RMSNorm(config.n_embd, eps=config.rmsnorm_eps),
+                ln_f=SwissAIRMSNorm(config.n_embd, eps=config.rmsnorm_eps),
             )
         )
         
@@ -397,12 +379,17 @@ class SwissAI(GPTBase):
         hidden_states = self.transformer.wte(idx)  # (b, t, n_embd)
         
         # Get the pre-computed position embeddings for the current sequence
-        pos = torch.arange(0, t, dtype=torch.long, device=device)
-        freqs_cis = self.freqs_cis.to(hidden_states.device)[pos]
+        position_ids = torch.arange(0, t, dtype=torch.long, device=device).unsqueeze(0)
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        position_ids_expanded = position_ids[:, None, :].float()
+        freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos().to(hidden_states.dtype)
+        sin = emb.sin().to(hidden_states.dtype)
         
         # Forward through transformer layers
         for layer in self.transformer.h:
-            hidden_states = layer(hidden_states, freqs_cis)
+            hidden_states = layer(hidden_states, (cos, sin))
         
         # Apply final layer norm
         hidden_states = self.transformer.ln_f(hidden_states)
