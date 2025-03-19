@@ -167,8 +167,10 @@ def parse_args(base_parser, args, namespace):
     parser.add_argument("--init-std", default=0.02, type=float)
     parser.add_argument("--dropout", default=0.0, type=float)
     parser.add_argument("--n-head", default=12, type=int)
+    parser.add_argument("--n-kv-head", default=None, type=int)
     parser.add_argument("--n-layer", default=24, type=int)  # depths in att + ff blocks
     parser.add_argument("--sequence-length", default=512, type=int)
+    parser.add_argument("--rope-theta", default=500000, type=int)
     parser.add_argument(
         "--n-embd", default=768, type=int  # embedding size / hidden size ...
     )
@@ -213,4 +215,7 @@ def parse_args(base_parser, args, namespace):
         default=None,
     )
 
-    return parser.parse_args(args, namespace)
+    args = parser.parse_args(args, namespace)
+    if args.n_kv_head is None:
+        args.n_kv_head = args.n_head
+    return args

@@ -111,7 +111,7 @@ class SwissAIAttention(nn.Module):
         self.flash = hasattr(F, 'scaled_dot_product_attention')
         
         self.bias = config.bias
-        self.qk_norm = config.qk_norm
+        self.qk_norm = getattr(config, "qk_norm", True)
         
         # Key, query, value projections
         self.q_proj = QuantizedLinear(
@@ -216,7 +216,7 @@ class SwissAIMLP(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.hidden_act = getattr(config, "hidden_act", "xielu")
-        self.intermediate_size = config.intermediate_size
+        self.intermediate_size = config.n_embd * 6
         
         # If config doesn't specify a multiple_of value, use 256 as default
         self.multiple_of = getattr(config, "multiple_of", 256)
